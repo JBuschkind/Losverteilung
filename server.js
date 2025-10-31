@@ -85,6 +85,22 @@ function buildBannedSet() {
   return set;
 }
 
+function writeDistributionFile(mapping, outPath = 'Lose.txt') {
+  try {
+    const lines = [];
+    lines.push(`# Loseverteilung - erstellt am ${new Date().toISOString()}`);
+    lines.push(`# Format: GEBER, EMPFÄNGER`);
+    const pairs = Array.from(mapping.entries());
+    pairs.sort((a, b) => a[0].localeCompare(b[0], 'de'));
+    for (const [giver, receiver] of pairs) {
+      lines.push(`${giver}, ${receiver}`);
+    }
+    fs.writeFileSync(outPath, lines.join('\n'), 'utf8');
+  } catch (e) {
+    console.error('Fehler beim Schreiben von Lose.txt:', e);
+  }
+}
+
 function createDerangement(names, bannedSet) {
   if (names.length < 2) return null;
   // Try up to 1000 attempts (more than enough for family sizes)
@@ -188,6 +204,8 @@ wss.on('connection', (ws, req) => {
           send(sock, { type: 'your_target', target: mapping.get(info.name) });
         }
       }
+      // Persist the distribution for independent verification
+      writeDistributionFile(mapping);
       // Notify masters that draw happened
       broadcastToMasters({ type: 'draw_complete' });
     }
