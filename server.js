@@ -1,6 +1,7 @@
 const express = require('express');
 const http = require('http');
 const { WebSocketServer } = require('ws');
+const fs = require('fs');
 
 const PORT = 8080;
 
@@ -55,7 +56,36 @@ function shuffle(array) {
   return a;
 }
 
-function createDerangement(names) {
+function readConstraintsFile(path = 'constraints.txt') {
+  try {
+    const raw = fs.readFileSync(path, 'utf8');
+    const pairs = [];
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const parts = trimmed.split(',');
+      if (parts.length !== 2) continue;
+      const giver = parts[0].trim();
+      const receiver = parts[1].trim();
+      if (!giver || !receiver) continue;
+      pairs.push([giver.toLowerCase(), receiver.toLowerCase()]);
+    }
+    return pairs;
+  } catch (e) {
+    return [];
+  }
+}
+
+function buildBannedSet() {
+  const pairs = readConstraintsFile();
+  const set = new Set();
+  for (const [g, r] of pairs) {
+    set.add(`${g}|${r}`);
+  }
+  return set;
+}
+
+function createDerangement(names, bannedSet) {
   if (names.length < 2) return null;
   // Try up to 1000 attempts (more than enough for family sizes)
   for (let attempt = 0; attempt < 1000; attempt++) {
@@ -63,6 +93,10 @@ function createDerangement(names) {
     let valid = true;
     for (let i = 0; i < names.length; i++) {
       if (perm[i] === names[i]) {
+        valid = false;
+        break;
+      }
+      if (bannedSet && bannedSet.has(`${names[i].toLowerCase()}|${perm[i].toLowerCase()}`)) {
         valid = false;
         break;
       }
@@ -142,7 +176,8 @@ wss.on('connection', (ws, req) => {
         send(ws, { type: 'error', message: 'Mindestens 2 Teilnehmer nötig.' });
         return;
       }
-      const mapping = createDerangement(names);
+      const bannedSet = buildBannedSet();
+      const mapping = createDerangement(names, bannedSet);
       if (!mapping) {
         send(ws, { type: 'error', message: 'Konnte keine gültige Verteilung finden. Bitte erneut versuchen.' });
         return;
@@ -173,6 +208,8 @@ wss.on('connection', (ws, req) => {
 
 server.listen(PORT, () => {
   console.log(`Server läuft auf http://localhost:${PORT}`);
+  console.log('Optional: Einschränkungen aus \'constraints.txt\' werden berücksichtigt.');
+  console.log('Format je Zeile: GEBER, EMPFÄNGER   (z. B. "Alice, Bob"). \'#\' = Kommentar.');
 });
 
 
