@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Juleklapp – Teilnehmer</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>Juleklapp – Teilnehmer</h1>
+
+      <section id="name-section">
+        <label for="name-input">Dein Name</label>
+        <input id="name-input" type="text" maxlength="40" placeholder="Namen eingeben" />
+        <button id="join-btn">Beitreten</button>
+        <div id="name-error" class="error"></div>
+      </section>
+
+      <section id="waiting-section" class="hidden">
+        <p>Warte auf die Auslosung …</p>
+      </section>
+
+      <section id="result-section" class="hidden">
+        <p>Du beschenkst:</p>
+        <div id="result-name" class="result-name"></div>
+      </section>
+    </main>
+
+    <script>
+      const nameInput = document.getElementById('name-input');
+      const joinBtn = document.getElementById('join-btn');
+      const nameError = document.getElementById('name-error');
+      const nameSection = document.getElementById('name-section');
+      const waitingSection = document.getElementById('waiting-section');
+      const resultSection = document.getElementById('result-section');
+      const resultName = document.getElementById('result-name');
+
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}/?role=participant`);
+
+      ws.addEventListener('message', (ev) => {
+        const data = JSON.parse(ev.data);
+        if (data.type === 'error') {
+          nameError.textContent = data.message || 'Fehler.';
+        }
+        if (data.type === 'name_ok') {
+          nameError.textContent = '';
+          nameSection.classList.add('hidden');
+          waitingSection.classList.remove('hidden');
+        }
+        if (data.type === 'reset') {
+          // Master hat dich entfernt
+          waitingSection.classList.add('hidden');
+          resultSection.classList.add('hidden');
+          nameSection.classList.remove('hidden');
+        }
+        if (data.type === 'your_target') {
+          waitingSection.classList.add('hidden');
+          resultName.textContent = data.target;
+          resultSection.classList.remove('hidden');
+        }
+      });
+
+      joinBtn.addEventListener('click', () => {
+        const name = (nameInput.value || '').trim();
+        if (!name) {
+          nameError.textContent = 'Bitte Namen eingeben.';
+          return;
+        }
+        ws.send(JSON.stringify({ type: 'set_name', name }));
+      });
+    </script>
+  </body>
+  </html>
+
+
+

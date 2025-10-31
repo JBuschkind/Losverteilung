@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Juleklapp – Master</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>Juleklapp – Master</h1>
+
+      <section>
+        <div class="toolbar">
+          <button id="draw-btn" class="primary">LOS!</button>
+          <span id="hint">Starte erst, wenn alle beigetreten sind.</span>
+        </div>
+      </section>
+
+      <section>
+        <h2>Teilnehmer</h2>
+        <ul id="list" class="list"></ul>
+      </section>
+
+      <div id="msg" class="msg"></div>
+    </main>
+
+    <script>
+      const list = document.getElementById('list');
+      const drawBtn = document.getElementById('draw-btn');
+      const msg = document.getElementById('msg');
+
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}/?role=master`);
+
+      function render(names) {
+        list.innerHTML = '';
+        names.forEach((n) => {
+          const li = document.createElement('li');
+          li.className = 'list-item';
+          const span = document.createElement('span');
+          span.textContent = n;
+          const btn = document.createElement('button');
+          btn.textContent = 'Entfernen';
+          btn.addEventListener('click', () => {
+            ws.send(JSON.stringify({ type: 'remove_name', name: n }));
+          });
+          li.appendChild(span);
+          li.appendChild(btn);
+          list.appendChild(li);
+        });
+        drawBtn.disabled = names.length < 2;
+      }
+
+      ws.addEventListener('message', (ev) => {
+        const data = JSON.parse(ev.data);
+        if (data.type === 'participants') {
+          render(data.participants || []);
+        }
+        if (data.type === 'error') {
+          msg.textContent = data.message || 'Fehler';
+          setTimeout(() => (msg.textContent = ''), 3000);
+        }
+        if (data.type === 'draw_complete') {
+          msg.textContent = 'Auslosung abgeschlossen!';
+          setTimeout(() => (msg.textContent = ''), 5000);
+        }
+      });
+
+      drawBtn.addEventListener('click', () => {
+        ws.send(JSON.stringify({ type: 'start_draw' }));
+      });
+    </script>
+  </body>
+  </html>
+
+
+
