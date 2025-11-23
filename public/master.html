@@ -33,29 +33,61 @@
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(`${proto}://${location.host}/?role=master`);
 
-      function render(names) {
+      function render(participantsData) {
         list.innerHTML = '';
-        names.forEach((n) => {
+        const participants = participantsData || [];
+        participants.forEach((p) => {
           const li = document.createElement('li');
           li.className = 'list-item';
-          const span = document.createElement('span');
-          span.textContent = n;
+          
+          const infoDiv = document.createElement('div');
+          infoDiv.style.display = 'flex';
+          infoDiv.style.flexDirection = 'column';
+          infoDiv.style.gap = '4px';
+          
+          const nameSpan = document.createElement('span');
+          nameSpan.textContent = p.name || p;
+          nameSpan.style.fontWeight = 'bold';
+          
+          const emailSpan = document.createElement('span');
+          emailSpan.textContent = typeof p === 'object' ? p.email : '';
+          emailSpan.style.fontSize = '0.9em';
+          emailSpan.style.color = '#666';
+          
+          const statusSpan = document.createElement('span');
+          if (typeof p === 'object') {
+            statusSpan.textContent = p.online ? '🟢 Online' : '⚫ Offline';
+            statusSpan.style.fontSize = '0.85em';
+            statusSpan.style.color = p.online ? '#4CAF50' : '#999';
+          }
+          
+          infoDiv.appendChild(nameSpan);
+          if (typeof p === 'object' && p.email) {
+            infoDiv.appendChild(emailSpan);
+          }
+          if (typeof p === 'object') {
+            infoDiv.appendChild(statusSpan);
+          }
+          
           const btn = document.createElement('button');
           btn.textContent = 'Entfernen';
           btn.addEventListener('click', () => {
-            ws.send(JSON.stringify({ type: 'remove_name', name: n }));
+            ws.send(JSON.stringify({ type: 'remove_name', name: p.name || p }));
           });
-          li.appendChild(span);
+          
+          li.appendChild(infoDiv);
           li.appendChild(btn);
           list.appendChild(li);
         });
-        drawBtn.disabled = names.length < 2;
+        drawBtn.disabled = participants.length < 2;
       }
 
       ws.addEventListener('message', (ev) => {
         const data = JSON.parse(ev.data);
         if (data.type === 'participants') {
-          render(data.participants || []);
+          // Use participantsWithEmail if available, otherwise fall back to participants array
+          const participantsData = data.participantsWithEmail || data.participants || [];
+          render(participantsData);
         }
         if (data.type === 'error') {
           msg.textContent = data.message || 'Fehler';

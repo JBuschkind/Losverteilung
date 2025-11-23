@@ -109,8 +109,46 @@ function getParticipantNames() {
   for (const { name } of participants.values()) {
     if (name) names.push(name);
   }
+  // Also include offline participants (from sessions)
+  for (const session of sessions.values()) {
+    if (session.name && session.email && !session.target) {
+      // Only include if not already in list and not yet drawn
+      if (!names.some(n => n.toLowerCase() === session.name.toLowerCase())) {
+        names.push(session.name);
+      }
+    }
+  }
   names.sort((a, b) => a.localeCompare(b, 'de'));
   return names;
+}
+
+function getAllParticipants() {
+  // Returns array of { name, email, online } objects
+  const participantMap = new Map();
+  
+  // Add online participants
+  for (const { name, email } of participants.values()) {
+    if (name && email) {
+      participantMap.set(name.toLowerCase(), { name, email, online: true });
+    }
+  }
+  
+  // Add offline participants (from sessions)
+  for (const session of sessions.values()) {
+    if (session.name && session.email && !session.target) {
+      const key = session.name.toLowerCase();
+      if (!participantMap.has(key)) {
+        participantMap.set(key, { name: session.name, email: session.email, online: false });
+      } else {
+        // Update to show as online if they are
+        participantMap.get(key).online = true;
+      }
+    }
+  }
+  
+  const result = Array.from(participantMap.values());
+  result.sort((a, b) => a.name.localeCompare(b.name, 'de'));
+  return result;
 }
 
 function getParticipantInfo(name) {
@@ -123,8 +161,16 @@ function getParticipantInfo(name) {
 }
 
 function isNameTaken(name) {
+  const nameLower = name.toLowerCase();
+  // Check online participants
   for (const { name: n } of participants.values()) {
-    if (n && n.toLowerCase() === name.toLowerCase()) return true;
+    if (n && n.toLowerCase() === nameLower) return true;
+  }
+  // Check offline participants (from sessions)
+  for (const session of sessions.values()) {
+    if (session.name && session.name.toLowerCase() === nameLower && !session.target) {
+      return true;
+    }
   }
   return false;
 }
@@ -211,7 +257,12 @@ function createDerangement(names, bannedSet) {
 }
 
 function broadcastParticipantsUpdate() {
-  broadcastToMasters({ type: 'participants', participants: getParticipantNames() });
+  const allParticipants = getAllParticipants();
+  broadcastToMasters({ 
+    type: 'participants', 
+    participants: allParticipants.map(p => p.name),
+    participantsWithEmail: allParticipants
+  });
 }
 
 // Heartbeat mechanism to keep connections alive
@@ -243,7 +294,12 @@ wss.on('connection', (ws, req) => {
 
   if (role === 'master') {
     masters.add(ws);
-    send(ws, { type: 'participants', participants: getParticipantNames() });
+    const allParticipants = getAllParticipants();
+    send(ws, { 
+      type: 'participants', 
+      participants: allParticipants.map(p => p.name),
+      participantsWithEmail: allParticipants
+    });
   } else {
     // Check for existing session via cookie
     const sessionId = req.headers.cookie ? 
@@ -331,12 +387,24 @@ wss.on('connection', (ws, req) => {
 
     if (role === 'master' && data.type === 'remove_name' && typeof data.name === 'string') {
       const target = data.name.trim();
+      const targetLower = target.toLowerCase();
+      
+      // Remove from online participants
       for (const [sock, info] of participants.entries()) {
-        if (info.name && info.name.toLowerCase() === target.toLowerCase()) {
+        if (info.name && info.name.toLowerCase() === targetLower) {
           info.name = null;
+          info.email = null;
           send(sock, { type: 'reset' });
         }
       }
+      
+      // Remove from sessions (offline participants)
+      for (const [sessionId, session] of sessions.entries()) {
+        if (session.name && session.name.toLowerCase() === targetLower) {
+          sessions.delete(sessionId);
+        }
+      }
+      
       broadcastParticipantsUpdate();
     }
 
@@ -354,6 +422,8 @@ wss.on('connection', (ws, req) => {
       }
       // Send each participant their target and save to session
       const emailPromises = [];
+      
+      // Process online participants
       for (const [sock, info] of participants.entries()) {
         if (info.name && mapping.has(info.name)) {
           const target = mapping.get(info.name);
@@ -368,6 +438,17 @@ wss.on('connection', (ws, req) => {
           if (info.email) {
             emailPromises.push(sendEmail(info.email, info.name, target));
           }
+        }
+      }
+      
+      // Process offline participants (from sessions)
+      for (const [sessionId, session] of sessions.entries()) {
+        if (session.name && session.email && !session.target && mapping.has(session.name)) {
+          const target = mapping.get(session.name);
+          session.target = target;
+          
+          // Send email to offline participant
+          emailPromises.push(sendEmail(session.email, session.name, target));
         }
       }
       
