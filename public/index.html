@@ -13,6 +13,8 @@
       <section id="name-section">
         <label for="name-input">Dein Name</label>
         <input id="name-input" type="text" maxlength="40" placeholder="Namen eingeben" />
+        <label for="email-input">Deine E-Mail-Adresse</label>
+        <input id="email-input" type="email" placeholder="email@beispiel.de" />
         <button id="join-btn">Beitreten</button>
         <div id="name-error" class="error"></div>
       </section>
@@ -29,6 +31,7 @@
 
     <script>
       const nameInput = document.getElementById('name-input');
+      const emailInput = document.getElementById('email-input');
       const joinBtn = document.getElementById('join-btn');
       const nameError = document.getElementById('name-error');
       const nameSection = document.getElementById('name-section');
@@ -36,39 +39,145 @@
       const resultSection = document.getElementById('result-section');
       const resultName = document.getElementById('result-name');
 
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      const ws = new WebSocket(`${proto}://${location.host}/?role=participant`);
+      // Cookie helper functions
+      function setCookie(name, value, days) {
+        const expires = new Date();
+        expires.setTime(expires.getTime() + (days * 24 * 60 * 60 * 1000));
+        document.cookie = `${name}=${value};expires=${expires.toUTCString()};path=/`;
+      }
 
-      ws.addEventListener('message', (ev) => {
-        const data = JSON.parse(ev.data);
-        if (data.type === 'error') {
-          nameError.textContent = data.message || 'Fehler.';
+      function getCookie(name) {
+        const nameEQ = name + "=";
+        const ca = document.cookie.split(';');
+        for (let i = 0; i < ca.length; i++) {
+          let c = ca[i];
+          while (c.charAt(0) === ' ') c = c.substring(1, c.length);
+          if (c.indexOf(nameEQ) === 0) return c.substring(nameEQ.length, c.length);
         }
-        if (data.type === 'name_ok') {
-          nameError.textContent = '';
-          nameSection.classList.add('hidden');
-          waitingSection.classList.remove('hidden');
+        return null;
+      }
+
+      // Try to restore session on page load
+      async function restoreSession() {
+        const sessionId = getCookie('sessionId');
+        if (!sessionId) return;
+
+        try {
+          const response = await fetch(`/api/session/${sessionId}`);
+          if (response.ok) {
+            const session = await response.json();
+            if (session.name) {
+              nameInput.value = session.name;
+              emailInput.value = session.email || '';
+              
+              if (session.target) {
+                // Already has a target, show it
+                nameSection.classList.add('hidden');
+                waitingSection.classList.add('hidden');
+                resultName.textContent = session.target;
+                resultSection.classList.remove('hidden');
+              } else {
+                // Has name/email but no target yet
+                nameSection.classList.add('hidden');
+                waitingSection.classList.remove('hidden');
+              }
+            }
+          }
+        } catch (e) {
+          console.log('Session-Wiederherstellung fehlgeschlagen:', e);
         }
-        if (data.type === 'reset') {
-          // Master hat dich entfernt
-          waitingSection.classList.add('hidden');
-          resultSection.classList.add('hidden');
-          nameSection.classList.remove('hidden');
-        }
-        if (data.type === 'your_target') {
-          waitingSection.classList.add('hidden');
-          resultName.textContent = data.target;
-          resultSection.classList.remove('hidden');
-        }
-      });
+      }
+
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      let ws = null;
+
+      function connectWebSocket() {
+        ws = new WebSocket(`${proto}://${location.host}/?role=participant`);
+        
+        // Set cookie from server response if provided
+        ws.addEventListener('message', (ev) => {
+          const data = JSON.parse(ev.data);
+          if (data.sessionId) {
+            setCookie('sessionId', data.sessionId, 365); // Store for 1 year
+          }
+        });
+        
+        setupWebSocketHandlers();
+      }
+
+      function setupWebSocketHandlers() {
+
+        ws.addEventListener('message', (ev) => {
+          const data = JSON.parse(ev.data);
+          if (data.type === 'error') {
+            nameError.textContent = data.message || 'Fehler.';
+          }
+          if (data.type === 'name_ok') {
+            nameError.textContent = '';
+            nameSection.classList.add('hidden');
+            waitingSection.classList.remove('hidden');
+            if (data.sessionId) {
+              setCookie('sessionId', data.sessionId, 365);
+            }
+          }
+          if (data.type === 'reset') {
+            // Master hat dich entfernt
+            waitingSection.classList.add('hidden');
+            resultSection.classList.add('hidden');
+            nameSection.classList.remove('hidden');
+          }
+          if (data.type === 'your_target') {
+            waitingSection.classList.add('hidden');
+            resultName.textContent = data.target;
+            resultSection.classList.remove('hidden');
+          }
+        });
+
+        ws.addEventListener('close', () => {
+          // Reconnect after a short delay
+          setTimeout(() => {
+            if (ws.readyState === WebSocket.CLOSED) {
+              connectWebSocket();
+            }
+          }, 3000);
+        });
+
+        ws.addEventListener('error', () => {
+          // Will trigger reconnect on close
+        });
+      }
 
       joinBtn.addEventListener('click', () => {
         const name = (nameInput.value || '').trim();
+        const email = (emailInput.value || '').trim();
+        
         if (!name) {
           nameError.textContent = 'Bitte Namen eingeben.';
           return;
         }
-        ws.send(JSON.stringify({ type: 'set_name', name }));
+        if (!email) {
+          nameError.textContent = 'Bitte E-Mail-Adresse eingeben.';
+          return;
+        }
+        
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'set_name', name, email }));
+        } else {
+          nameError.textContent = 'Verbindung zum Server wird hergestellt...';
+          connectWebSocket();
+          setTimeout(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'set_name', name, email }));
+            } else {
+              nameError.textContent = 'Verbindung fehlgeschlagen. Bitte Seite neu laden.';
+            }
+          }, 1000);
+        }
+      });
+
+      // Initialize: restore session and connect
+      restoreSession().then(() => {
+        connectWebSocket();
       });
     </script>
   </body>

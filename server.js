@@ -1,11 +1,17 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const fs = require('fs');
+const cookieParser = require('cookie-parser');
+const nodemailer = require('nodemailer');
+const crypto = require('crypto');
 
 const PORT = 8085;
 
 const app = express();
+app.use(express.json());
+app.use(cookieParser());
 app.use(express.static('public'));
 
 const server = http.createServer(app);
@@ -17,11 +23,74 @@ const wss = new WebSocketServer({
 
 /**
  * Connection state
- * - participants: Map<ws, { name: string|null }>
+ * - participants: Map<ws, { name: string|null, email: string|null, sessionId: string }>
  * - masters: Set<ws>
+ * - sessions: Map<sessionId, { name: string, email: string, target: string|null }>
  */
 const participants = new Map();
 const masters = new Set();
+const sessions = new Map(); // Persistent session storage
+
+// Email configuration (can be set via environment variables)
+const emailConfig = {
+  host: process.env.SMTP_HOST || 'smtp.gmail.com',
+  port: parseInt(process.env.SMTP_PORT || '587'),
+  secure: false, // true for 465, false for other ports
+  auth: {
+    user: process.env.SMTP_USER || '',
+    pass: process.env.SMTP_PASS || ''
+  }
+};
+
+// Create email transporter (only if credentials are provided)
+let emailTransporter = null;
+if (emailConfig.auth.user && emailConfig.auth.pass) {
+  emailTransporter = nodemailer.createTransport(emailConfig);
+} else {
+  console.warn('WARNUNG: E-Mail-Konfiguration nicht gesetzt. E-Mails werden nicht versendet.');
+  console.warn('Setze SMTP_USER und SMTP_PASS Umgebungsvariablen oder bearbeite server.js');
+}
+
+function generateSessionId() {
+  return crypto.randomBytes(16).toString('hex');
+}
+
+function isValidEmail(email) {
+  const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return re.test(email);
+}
+
+async function sendEmail(to, name, target) {
+  if (!emailTransporter) {
+    console.warn(`E-Mail würde an ${to} gesendet werden, aber E-Mail-Konfiguration fehlt.`);
+    return false;
+  }
+
+  try {
+    const info = await emailTransporter.sendMail({
+      from: emailConfig.auth.user,
+      to: to,
+      subject: 'Dein Juleklapp Los',
+      text: `Hallo ${name},\n\nDu beschenkst: ${target}\n\nViel Spaß beim Schenken!\n\nDiese E-Mail wurde automatisch von der Juleklapp Losverteilung gesendet.`,
+      html: `
+        <html>
+          <body>
+            <h2>Hallo ${name},</h2>
+            <p>Du beschenkst: <strong>${target}</strong></p>
+            <p>Viel Spaß beim Schenken!</p>
+            <hr>
+            <p><small>Diese E-Mail wurde automatisch von der Juleklapp Losverteilung gesendet.</small></p>
+          </body>
+        </html>
+      `
+    });
+    console.log(`E-Mail erfolgreich an ${to} gesendet: ${info.messageId}`);
+    return true;
+  } catch (error) {
+    console.error(`Fehler beim Senden der E-Mail an ${to}:`, error);
+    return false;
+  }
+}
 
 function send(ws, data) {
   if (ws.readyState === ws.OPEN) {
@@ -42,6 +111,15 @@ function getParticipantNames() {
   }
   names.sort((a, b) => a.localeCompare(b, 'de'));
   return names;
+}
+
+function getParticipantInfo(name) {
+  for (const info of participants.values()) {
+    if (info.name && info.name.toLowerCase() === name.toLowerCase()) {
+      return info;
+    }
+  }
+  return null;
 }
 
 function isNameTaken(name) {
@@ -167,7 +245,33 @@ wss.on('connection', (ws, req) => {
     masters.add(ws);
     send(ws, { type: 'participants', participants: getParticipantNames() });
   } else {
-    participants.set(ws, { name: null });
+    // Check for existing session via cookie
+    const sessionId = req.headers.cookie ? 
+      (req.headers.cookie.match(/sessionId=([^;]+)/) || [])[1] : null;
+    
+    let sessionData = null;
+    if (sessionId && sessions.has(sessionId)) {
+      sessionData = sessions.get(sessionId);
+    }
+    
+    const participantData = { 
+      name: sessionData?.name || null, 
+      email: sessionData?.email || null,
+      sessionId: sessionId || generateSessionId()
+    };
+    
+    participants.set(ws, participantData);
+    
+    // If session exists, restore state
+    if (sessionData) {
+      if (sessionData.target) {
+        // Already has a target, send it immediately
+        send(ws, { type: 'your_target', target: sessionData.target });
+      } else if (sessionData.name && sessionData.email) {
+        // Has name and email but no target yet, confirm registration
+        send(ws, { type: 'name_ok', name: sessionData.name });
+      }
+    }
   }
 
   ws.on('message', (raw) => {
@@ -178,14 +282,24 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
-    if (data.type === 'set_name' && typeof data.name === 'string') {
+    if (data.type === 'set_name' && typeof data.name === 'string' && typeof data.email === 'string') {
       const trimmed = data.name.trim();
+      const trimmedEmail = data.email.trim();
+      
       if (!trimmed) {
         send(ws, { type: 'error', message: 'Name darf nicht leer sein.' });
         return;
       }
       if (trimmed.length > 40) {
         send(ws, { type: 'error', message: 'Name ist zu lang (max. 40).' });
+        return;
+      }
+      if (!trimmedEmail) {
+        send(ws, { type: 'error', message: 'E-Mail-Adresse darf nicht leer sein.' });
+        return;
+      }
+      if (!isValidEmail(trimmedEmail)) {
+        send(ws, { type: 'error', message: 'Ungültige E-Mail-Adresse.' });
         return;
       }
       if (isNameTaken(trimmed)) {
@@ -197,8 +311,21 @@ wss.on('connection', (ws, req) => {
         send(ws, { type: 'error', message: 'Ungültige Aktion.' });
         return;
       }
-      participants.get(ws).name = trimmed;
-      send(ws, { type: 'name_ok', name: trimmed });
+      
+      const participant = participants.get(ws);
+      participant.name = trimmed;
+      participant.email = trimmedEmail;
+      
+      // Save to session
+      if (!sessions.has(participant.sessionId)) {
+        sessions.set(participant.sessionId, { name: trimmed, email: trimmedEmail, target: null });
+      } else {
+        const session = sessions.get(participant.sessionId);
+        session.name = trimmed;
+        session.email = trimmedEmail;
+      }
+      
+      send(ws, { type: 'name_ok', name: trimmed, sessionId: participant.sessionId });
       broadcastParticipantsUpdate();
     }
 
@@ -225,14 +352,34 @@ wss.on('connection', (ws, req) => {
         send(ws, { type: 'error', message: 'Konnte keine gültige Verteilung finden. Bitte erneut versuchen.' });
         return;
       }
-      // Send each participant their target
+      // Send each participant their target and save to session
+      const emailPromises = [];
       for (const [sock, info] of participants.entries()) {
         if (info.name && mapping.has(info.name)) {
-          send(sock, { type: 'your_target', target: mapping.get(info.name) });
+          const target = mapping.get(info.name);
+          send(sock, { type: 'your_target', target: target });
+          
+          // Update session with target
+          if (info.sessionId && sessions.has(info.sessionId)) {
+            sessions.get(info.sessionId).target = target;
+          }
+          
+          // Send email
+          if (info.email) {
+            emailPromises.push(sendEmail(info.email, info.name, target));
+          }
         }
       }
+      
       // Persist the distribution for independent verification
       writeDistributionFile(mapping);
+      
+      // Wait for emails to be sent (but don't block)
+      Promise.all(emailPromises).then(results => {
+        const successCount = results.filter(r => r).length;
+        console.log(`${successCount} von ${emailPromises.length} E-Mails erfolgreich versendet.`);
+      });
+      
       // Notify masters that draw happened
       broadcastToMasters({ type: 'draw_complete' });
     }
@@ -245,16 +392,37 @@ wss.on('connection', (ws, req) => {
     }
     if (participants.has(ws)) {
       const hadName = participants.get(ws).name;
+      // Note: We keep the session data even when WebSocket closes
       participants.delete(ws);
       if (hadName) broadcastParticipantsUpdate();
     }
   });
 });
 
+// API endpoint to restore session
+app.get('/api/session/:sessionId', (req, res) => {
+  const sessionId = req.params.sessionId;
+  if (sessions.has(sessionId)) {
+    const session = sessions.get(sessionId);
+    res.json({ 
+      name: session.name, 
+      email: session.email, 
+      target: session.target 
+    });
+  } else {
+    res.status(404).json({ error: 'Session nicht gefunden' });
+  }
+});
+
 server.listen(PORT, () => {
   console.log(`Server läuft auf http://localhost:${PORT}`);
   console.log('Optional: Einschränkungen aus \'constraints.txt\' werden berücksichtigt.');
   console.log('Format je Zeile: GEBER, EMPFÄNGER   (z. B. "Alice, Bob"). \'#\' = Kommentar.');
+  if (!emailTransporter) {
+    console.log('\n⚠️  E-Mail-Versand deaktiviert. Setze SMTP_USER und SMTP_PASS Umgebungsvariablen.');
+  } else {
+    console.log('✓ E-Mail-Versand aktiviert.');
+  }
 });
 
 
