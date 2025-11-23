@@ -9,7 +9,11 @@ const app = express();
 app.use(express.static('public'));
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ 
+  server,
+  clientTracking: true,
+  perMessageDeflate: false
+});
 
 /**
  * Connection state
@@ -132,7 +136,30 @@ function broadcastParticipantsUpdate() {
   broadcastToMasters({ type: 'participants', participants: getParticipantNames() });
 }
 
+// Heartbeat mechanism to keep connections alive
+function setupHeartbeat() {
+  setInterval(() => {
+    wss.clients.forEach((ws) => {
+      if (ws.isAlive === false) {
+        ws.terminate();
+        return;
+      }
+      ws.isAlive = false;
+      ws.ping();
+    });
+  }, 30000); // Ping every 30 seconds
+}
+
+// Start heartbeat
+setupHeartbeat();
+
 wss.on('connection', (ws, req) => {
+  ws.isAlive = true;
+  
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
+
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const role = url.searchParams.get('role') || 'participant';
 
